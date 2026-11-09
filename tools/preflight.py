@@ -73,6 +73,27 @@ def notebook():
     return f"{len(nb['cells'])} cells, {len(code_cells)} code cells compile"
 
 
+INSTALL_CELL_GUARDS = {
+    "notebooks/01_setup_and_load_stats.ipynb": ("huggingface-hub>=0.24,<1.0", "datasets>=2.19,<5"),
+    "notebooks/02_olmoe_balance_and_baselines.ipynb": ("huggingface-hub>=0.24,<1.0", "datasets>=2.19,<5"),
+}
+
+
+def install_pins():
+    """A bare `pip install datasets` silently breaks the transformers pin; forbid it."""
+    for rel, required in INSTALL_CELL_GUARDS.items():
+        path = ROOT / rel
+        assert path.exists(), f"missing notebook {rel}"
+        text = path.read_text()
+        for needle in required:
+            assert needle in text, f"{rel} install cell is missing the bound {needle!r}"
+        assert '"datasets"' not in text, (
+            f"{rel} installs unbounded 'datasets', which upgrades huggingface-hub past 1.0 "
+            "and makes transformers 4.48.3 unimportable"
+        )
+    return f"{len(INSTALL_CELL_GUARDS)} notebooks carry hub/datasets bounds"
+
+
 def tree():
     expected = [
         "configs/protocol.yaml",
@@ -83,22 +104,30 @@ def tree():
         "routerguard/stats.py",
         "routerguard/run.py",
         "notebooks/01_setup_and_load_stats.ipynb",
-        # Step 2 (added once the equivalence gate is in place)
+        # Step 2
         "routerguard/moe.py",
         "tests/__init__.py",
         "tests/conftest.py",
         "tests/test_equivalence.py",
         "tests/test_smoke.py",
+        # Step 3
+        "routerguard/balance.py",
+        "routerguard/prune.py",
+        "routerguard/eval.py",
+        "notebooks/02_olmoe_balance_and_baselines.ipynb",
+        "tests/test_step3.py",
+        "tools/preflight_step3.py",
     ]
     missing = [p for p in expected if not (ROOT / p).exists()]
     assert not missing, f"missing: {missing}"
-    return f"{len(expected)} Step-1 files present"
+    return f"{len(expected)} project files present"
 
 
 print(f"pre-flight: {ROOT}")
 check("modules compile", modules)
 check("protocol.yaml", protocol)
 check("notebook 01", notebook)
+check("install pins", install_pins)
 check("file tree", tree)
 print()
 if failures:

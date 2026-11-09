@@ -20,9 +20,26 @@ FALLBACK_TRANSFORMERS = ("4.49.0", "4.51.3")
 ALLOWED_TRANSFORMERS = (REQUIRED_TRANSFORMERS,) + FALLBACK_TRANSFORMERS
 MIN_TORCH = "2.2.0"
 
+# transformers 4.48.3 requires huggingface-hub>=0.24,<1.0. A modern `datasets` wants
+# hub>=1.31 and will happily upgrade it during `pip install datasets`, after which
+# transformers cannot even be imported. This is silent, session-wasting, and easy to
+# hit in Colab, so the range is asserted rather than assumed.
+HUB_MIN, HUB_MAX = "0.24.0", "1.0.0"
+DATASETS_MIN, DATASETS_MAX = "2.19.0", "5.0.0"
+
+INSTALL_PACKAGES = (
+    f"transformers=={REQUIRED_TRANSFORMERS}",
+    f"huggingface-hub>={HUB_MIN},<{HUB_MAX}",
+    f"datasets>={DATASETS_MIN},<{DATASETS_MAX}",
+    "accelerate",
+    "bitsandbytes>=0.43.3",
+    "pyyaml",
+    "matplotlib",
+    "sentencepiece",
+)
+
 INSTALL_HINT = (
-    "pip install -q 'transformers==" + REQUIRED_TRANSFORMERS + "' accelerate datasets pyyaml "
-    "&& pip install -q 'bitsandbytes>=0.43.3'   # then RESTART the runtime"
+    "pip install -q " + " ".join(f"'{p}'" for p in INSTALL_PACKAGES) + "   # then RESTART the runtime"
 )
 
 
@@ -40,6 +57,8 @@ def _vtuple(s: str) -> tuple[int, ...]:
 PACKAGE_MODULES = {
     "torch": "torch",
     "transformers": "transformers",
+    "huggingface-hub": "huggingface_hub",
+    "tokenizers": "tokenizers",
     "accelerate": "accelerate",
     "bitsandbytes": "bitsandbytes",
     "datasets": "datasets",
@@ -113,6 +132,25 @@ def assert_env(strict: bool = True) -> dict[str, Any]:
         report.setdefault("warnings", []).append(
             f"running on fallback transformers {tf}; results must be reported with this version"
         )
+
+    hub = report["versions"].get("huggingface-hub", "")
+    if hub and not hub.startswith("missing"):
+        if not (_vtuple(HUB_MIN) <= _vtuple(hub) < _vtuple(HUB_MAX)):
+            raise RuntimeError(
+                f"huggingface-hub=={hub} is incompatible with transformers {tf} "
+                f"(needs >={HUB_MIN},<{HUB_MAX}).\n"
+                "This is almost always caused by a package such as `datasets` upgrading the\n"
+                "hub as a side effect of installation; transformers then fails to import.\n"
+                f"Fix:\n  {INSTALL_HINT}"
+            )
+    datasets_v = report["versions"].get("datasets", "")
+    if datasets_v and not datasets_v.startswith("missing"):
+        if _vtuple(datasets_v) >= _vtuple(DATASETS_MAX) or _vtuple(datasets_v) < _vtuple(DATASETS_MIN):
+            raise RuntimeError(
+                f"datasets=={datasets_v} is outside the range this project supports "
+                f">={DATASETS_MIN},<{DATASETS_MAX} (newer releases require huggingface-hub>=1.x,\n"
+                f"which breaks transformers {tf}).\nFix:\n  {INSTALL_HINT}"
+            )
 
     torch_v = report["versions"]["torch"]
     if not torch_v.startswith("missing") and _vtuple(torch_v) < _vtuple(MIN_TORCH):
