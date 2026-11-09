@@ -136,6 +136,8 @@ def tree():
         "notebooks/03_redundancy_ablation.ipynb",
         "tests/test_step4.py",
         "tools/preflight_step4.py",
+        # Write-up
+        "README.md",
     ]
     missing = [p for p in expected if not (ROOT / p).exists()]
     assert not missing, f"missing: {missing}"
