@@ -7,11 +7,18 @@ Precision policy
 ----------------
 * OLMoE bf16 is 13.8 GB of weights -> needs an A100/L4-class card. T4 (Turing,
   cc 7.5) has no native bf16 and 16 GB, so ``auto`` picks 8-bit there.
-* Qwen1.5-MoE is always 4-bit NF4 with bf16 compute, gates kept in full precision.
+* Qwen1.5-MoE is always 4-bit NF4, gates kept in full precision.
+* Compute dtype follows the card, not the checkpoint: bf16 on Ampere+, fp16 on
+  Turing. bitsandbytes' int8/NF4 matmul kernels are fp16 internally on Turing, so
+  declaring bf16 there only produces "inputs will be cast from bfloat16 to float16"
+  warnings and a LoadInfo that misreports the dtype actually used. fp16 also has a
+  longer mantissa than bf16, and post-RMSNorm MoE activations sit far inside fp16
+  range, so nothing is lost by declaring it.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -69,6 +76,18 @@ def choose_precision(gpu: dict[str, Any] | None = None) -> str:
     return "8bit"  # T4 / V100-era: no native bf16, and 13.8 GB does not fit comfortably
 
 
+def compute_dtype_for(gpu: dict[str, Any] | None = None) -> torch.dtype:
+    """bf16 needs Ampere+; on Turing the bnb int8/NF4 kernels are fp16 anyway."""
+    gpu = gpu or gpu_info()
+    cc = tuple(int(x) for x in str(gpu.get("compute_capability", "0.0")).split("."))
+    return torch.bfloat16 if cc >= (8, 0) else torch.float16
+
+
+def quiet_bnb_logging(level: int = logging.ERROR) -> None:
+    """Silence bitsandbytes' per-matmul dtype chatter. Log level only: never touches math."""
+    logging.getLogger("bitsandbytes.autograd._functions").setLevel(level)
+
+
 def _count_params(model: torch.nn.Module, blocks: list[tuple[str, Any]]) -> tuple[int, int]:
     total = sum(p.numel() for p in model.parameters())
     moe = 0
@@ -97,7 +116,8 @@ def _active_estimate(model: torch.nn.Module, blocks: list[tuple[str, Any]], tota
     return total - routed + selected
 
 
-def _finalize(model, tokenizer, model_id: str, precision: str, notes: list[str]) -> LoadInfo:
+def _finalize(model, tokenizer, model_id: str, precision: str, notes: list[str],
+              compute_dtype: torch.dtype | None = None) -> LoadInfo:
     model.eval()
     # Router logits are only needed for inspection; never cache KV in eval loops.
     try:
@@ -119,7 +139,7 @@ def _finalize(model, tokenizer, model_id: str, precision: str, notes: list[str])
     info = LoadInfo(
         model_id=model_id,
         precision=precision,
-        compute_dtype=str(next(model.parameters()).dtype),
+        compute_dtype=str(compute_dtype or next(model.parameters()).dtype),
         total_params=total,
         moe_params=moe,
         active_params_estimate=_active_estimate(model, blocks, total),
@@ -140,6 +160,7 @@ def load_olmoe(
     double_quant: bool = False,
     cache_dir: str | None = None,
     attn_implementation: str | None = None,
+    quiet_bnb: bool = True,
 ) -> tuple[Any, Any, LoadInfo]:
     """Load OLMoE-1B-7B. ``precision`` in {auto, bf16, 8bit, 4bit}."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -151,6 +172,16 @@ def load_olmoe(
     if precision not in ("bf16", "8bit", "4bit"):
         raise ValueError(f"unsupported precision {precision!r}")
 
+    compute_dtype = compute_dtype_for()
+    gpu = gpu_info()
+    notes.append(
+        f"compute dtype {str(compute_dtype).split('.')[-1]} on {gpu.get('name')} "
+        f"(cc {gpu.get('compute_capability')})"
+    )
+    if quiet_bnb:
+        quiet_bnb_logging()
+        notes.append("bitsandbytes per-matmul dtype logging silenced (cosmetic only)")
+
     tokenizer = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
     kwargs: dict[str, Any] = {"cache_dir": cache_dir}
     if attn_implementation:
@@ -158,7 +189,7 @@ def load_olmoe(
 
     if precision == "bf16":
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16, device_map={"": device}, **kwargs
+            model_id, torch_dtype=compute_dtype, device_map={"": device}, **kwargs
         )
     else:
         from transformers import BitsAndBytesConfig
@@ -172,16 +203,16 @@ def load_olmoe(
             quant = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_compute_dtype=compute_dtype,
                 bnb_4bit_use_double_quant=double_quant,
                 llm_int8_skip_modules=OLMOE_SKIP_MODULES,
             )
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, quantization_config=quant, torch_dtype=torch.bfloat16,
+            model_id, quantization_config=quant, torch_dtype=compute_dtype,
             device_map={"": device}, **kwargs
         )
         notes.append("quantized load; compare only against unpruned OLMoE at the same precision")
-    return model, tokenizer, _finalize(model, tokenizer, model_id, precision, notes)
+    return model, tokenizer, _finalize(model, tokenizer, model_id, precision, notes, compute_dtype)
 
 
 def load_qwen(
@@ -190,20 +221,28 @@ def load_qwen(
     double_quant: bool = False,
     cache_dir: str | None = None,
     attn_implementation: str | None = None,
+    quiet_bnb: bool = True,
 ) -> tuple[Any, Any, LoadInfo]:
-    """Load Qwen1.5-MoE-A2.7B in NF4 with bf16 compute and full-precision routers."""
+    """Load Qwen1.5-MoE-A2.7B in NF4 with full-precision routers."""
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+    compute_dtype = compute_dtype_for()
+    gpu = gpu_info()
     notes = [
-        "NF4 4-bit, bf16 compute",
+        f"NF4 4-bit, {str(compute_dtype).split('.')[-1]} compute on {gpu.get('name')} "
+        f"(cc {gpu.get('compute_capability')})",
         f"skipped from quantization: {QWEN_SKIP_MODULES}",
         "routed experts only: the always-on shared expert is never pruned",
     ]
+    if quiet_bnb:
+        quiet_bnb_logging()
+        notes.append("bitsandbytes per-matmul dtype logging silenced (cosmetic only)")
+
     tokenizer = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
     quant = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=double_quant,
         llm_int8_skip_modules=QWEN_SKIP_MODULES,
     )
@@ -211,10 +250,10 @@ def load_qwen(
     if attn_implementation:
         kwargs["attn_implementation"] = attn_implementation
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, quantization_config=quant, torch_dtype=torch.bfloat16,
+        model_id, quantization_config=quant, torch_dtype=compute_dtype,
         device_map={"": device}, **kwargs
     )
-    info = _finalize(model, tokenizer, model_id, "4bit", notes)
+    info = _finalize(model, tokenizer, model_id, "4bit", notes, compute_dtype)
     if not info.structure.get("has_shared_expert"):
         raise RuntimeError("Qwen model has no shared_expert: wrong checkpoint or transformers version")
     return model, tokenizer, info

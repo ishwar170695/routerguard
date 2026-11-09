@@ -78,6 +78,11 @@ budget:
 design:
   ablation: balance_x_redundancy   # 2x2: balance on/off x redundancy on/off
   baselines: [random, frequency]
+  # Compute dtype follows the GPU, not the checkpoint: bf16 on Ampere+, fp16 on
+  # Turing (T4), because bnb's int8/NF4 matmul kernels are fp16 internally there.
+  # Every comparison is pruned vs unpruned at the SAME precision; never against
+  # published bf16 numbers.
+  compute_dtype: card-dependent
   fallback: >
     If the redundancy metric does not beat frequency pruning, the controlled
     negative result IS the deliverable, stated up front.
