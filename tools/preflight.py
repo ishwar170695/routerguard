@@ -40,7 +40,7 @@ PROTOCOL_KEYS = {
     "balance": ["method", "default_u", "iters", "selection_only"],
     "similarity": ["metric", "dtype", "save_dir"],
     "budget": ["max_tokens_per_layer", "max_layers", "max_greedy_steps"],
-    "design": ["ablation", "baselines", "fallback"],
+    "design": ["ablation", "baselines", "utilization_weight", "fallback"],
 }
 
 
@@ -57,25 +57,39 @@ def protocol():
     return f"{len(data)} top-level keys, gates={list(data['gates'])}"
 
 
+NOTEBOOKS = [
+    "notebooks/01_setup_and_load_stats.ipynb",
+    "notebooks/02_olmoe_balance_and_baselines.ipynb",
+    "notebooks/03_redundancy_ablation.ipynb",
+]
+
+
 def notebook():
-    path = ROOT / "notebooks" / "01_setup_and_load_stats.ipynb"
-    nb = json.loads(path.read_text())
-    code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
-    assert code_cells, "no code cells"
-    for i, cell in enumerate(code_cells):
-        src = "".join(cell["source"])
-        # Strip IPython magics before compiling.
-        src = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith(("%", "!")))
-        try:
-            compile(src, f"cell{i}", "exec")
-        except SyntaxError as exc:
-            raise SyntaxError(f"code cell {i}: {exc}") from exc
-    return f"{len(nb['cells'])} cells, {len(code_cells)} code cells compile"
+    total_cells = 0
+    total_code = 0
+    for rel in NOTEBOOKS:
+        path = ROOT / rel
+        assert path.exists(), f"missing notebook {rel}"
+        nb = json.loads(path.read_text())
+        code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
+        assert code_cells, f"{rel}: no code cells"
+        for i, cell in enumerate(code_cells):
+            src = "".join(cell["source"])
+            # Strip IPython magics before compiling.
+            src = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith(("%", "!")))
+            try:
+                compile(src, f"{rel}:cell{i}", "exec")
+            except SyntaxError as exc:
+                raise SyntaxError(f"{rel} code cell {i}: {exc}") from exc
+        total_cells += len(nb["cells"])
+        total_code += len(code_cells)
+    return f"{len(NOTEBOOKS)} notebooks, {total_code} code cells compile ({total_cells} cells)"
 
 
 INSTALL_CELL_GUARDS = {
     "notebooks/01_setup_and_load_stats.ipynb": ("huggingface-hub>=0.24,<1.0", "datasets>=2.19,<5"),
     "notebooks/02_olmoe_balance_and_baselines.ipynb": ("huggingface-hub>=0.24,<1.0", "datasets>=2.19,<5"),
+    "notebooks/03_redundancy_ablation.ipynb": ("huggingface-hub>=0.24,<1.0", "datasets>=2.19,<5"),
 }
 
 
@@ -117,6 +131,11 @@ def tree():
         "notebooks/02_olmoe_balance_and_baselines.ipynb",
         "tests/test_step3.py",
         "tools/preflight_step3.py",
+        # Step 4
+        "routerguard/similarity.py",
+        "notebooks/03_redundancy_ablation.ipynb",
+        "tests/test_step4.py",
+        "tools/preflight_step4.py",
     ]
     missing = [p for p in expected if not (ROOT / p).exists()]
     assert not missing, f"missing: {missing}"
@@ -126,7 +145,7 @@ def tree():
 print(f"pre-flight: {ROOT}")
 check("modules compile", modules)
 check("protocol.yaml", protocol)
-check("notebook 01", notebook)
+check("notebooks compile", notebook)
 check("install pins", install_pins)
 check("file tree", tree)
 print()

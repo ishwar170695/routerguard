@@ -70,14 +70,22 @@ similarity:
 
 budget:
   # Hard caps so a Colab session cannot silently run away.
+  # NOTE (pre-results correction): max_greedy_steps was 16, which cannot express a
+  # 50% removal on Qwen's 60 routed experts (that needs 30 removals) nor on OLMoE's
+  # 64 (32 removals). Raised to 64 before any Step 4 number was produced. Greedy
+  # removal recomputes scores from the similarity submatrix, so steps are cheap; the
+  # cap exists only to stop a runaway loop.
   max_tokens_per_layer: 100000
   max_layers: 24
-  max_greedy_steps: 16
+  max_greedy_steps: 64
   abort_if_projected_over_seconds: 3600   # notebook 04 timing probe
 
 design:
   ablation: balance_x_redundancy   # 2x2: balance on/off x redundancy on/off
   baselines: [random, frequency]
+  # How much the balanced-utilization term weighs against output uniqueness in the
+  # greedy removal score (primary term is uniqueness). Pinned before any result.
+  utilization_weight: 0.25
   # Compute dtype follows the GPU, not the checkpoint: bf16 on Ampere+, fp16 on
   # Turing (T4), because bnb's int8/NF4 matmul kernels are fp16 internally there.
   # Every comparison is pruned vs unpruned at the SAME precision; never against

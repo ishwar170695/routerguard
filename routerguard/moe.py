@@ -236,7 +236,9 @@ class MoePatch:
         n = int(block.num_experts)
         if value.numel() != n:
             raise ValueError(f"layer {layer}: bias has {value.numel()} entries, model has {n} experts")
-        return value
+        # Biases live on CPU between phases; coerce device and dtype here so a CPU
+        # tensor can never meet a CUDA logits tensor inside the forward pass.
+        return value.detach().to(device=block.gate.weight.device, dtype=torch.float32)
 
     def keep_for(self, layer: int) -> torch.Tensor | None:
         return self.keep_idx.get(layer)
@@ -274,10 +276,20 @@ def _bound_forward(patch: MoePatch, layer: int):
 
 
 class MaskSim(MoePatch):
-    """Simulate pruning without touching weights: same forward, restricted experts."""
+    """Simulate pruning without touching weights: same forward, restricted experts.
 
-    def __init__(self, model: nn.Module, keep_per_layer: dict[int, Sequence[int]] | Sequence[int],
-                 record: bool = False):
+    ``bias`` is optional and is indexed in the model's *current* (unpruned) expert
+    space, which is what the 2x2 ablation needs: a rebalanced router pruning under
+    the same bias it will run with.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        keep_per_layer: dict[int, Sequence[int]] | Sequence[int],
+        record: bool = False,
+        bias: torch.Tensor | dict[int, torch.Tensor] | None = None,
+    ):
         blocks = rgenv.find_moe_blocks(model)
         layers = [layer_index_from_name(name) for name, _ in blocks]
         if isinstance(keep_per_layer, dict):
@@ -288,7 +300,7 @@ class MaskSim(MoePatch):
         for layer, block in zip(layers, [b for _, b in blocks]):
             indices = per_layer[layer]
             keep_idx[layer] = torch.as_tensor(list(indices), dtype=torch.long, device=block.gate.weight.device)
-        super().__init__(model, keep_idx=keep_idx, record=record)
+        super().__init__(model, keep_idx=keep_idx, record=record, bias=bias)
 
 
 # ------------------------------------------------------------------------ removal

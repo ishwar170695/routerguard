@@ -339,7 +339,7 @@ def test_keeps_for_dispatch(flavor):
     assert prune.keeps_for(model, "random", 0.5, seed=1)
     with pytest.raises(ValueError, match="needs per_layer_counts"):
         prune.keeps_for(model, "frequency", 0.5)
-    with pytest.raises(NotImplementedError, match="Step 4"):
+    with pytest.raises(ValueError, match="needs similarity matrices"):
         prune.keeps_for(model, "redundancy", 0.5)
     with pytest.raises(ValueError, match="unknown pruning kind"):
         prune.keeps_for(model, "magic", 0.5)
