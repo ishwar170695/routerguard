@@ -36,15 +36,27 @@ def _vtuple(s: str) -> tuple[int, ...]:
     return tuple(out)
 
 
+# package name -> importable module name (they differ: pyyaml ships module "yaml")
+PACKAGE_MODULES = {
+    "torch": "torch",
+    "transformers": "transformers",
+    "accelerate": "accelerate",
+    "bitsandbytes": "bitsandbytes",
+    "datasets": "datasets",
+    "numpy": "numpy",
+    "pyyaml": "yaml",
+}
+
+
 def versions() -> dict[str, str]:
     """Installed versions of the packages this project depends on."""
     info: dict[str, str] = {"python": platform.python_version()}
-    for pkg in ("torch", "transformers", "accelerate", "bitsandbytes", "datasets", "pyyaml"):
+    for package, module_name in PACKAGE_MODULES.items():
         try:
-            mod = __import__(pkg)
-            info[pkg] = getattr(mod, "__version__", "unknown")
+            module = __import__(module_name)
+            info[package] = str(getattr(module, "__version__", "unknown"))
         except Exception as exc:  # noqa: BLE001 - report, never crash the dump
-            info[pkg] = f"missing ({type(exc).__name__})"
+            info[package] = f"missing ({type(exc).__name__})"
     return info
 
 
