@@ -83,6 +83,12 @@ def tree():
         "routerguard/stats.py",
         "routerguard/run.py",
         "notebooks/01_setup_and_load_stats.ipynb",
+        # Step 2 (added once the equivalence gate is in place)
+        "routerguard/moe.py",
+        "tests/__init__.py",
+        "tests/conftest.py",
+        "tests/test_equivalence.py",
+        "tests/test_smoke.py",
     ]
     missing = [p for p in expected if not (ROOT / p).exists()]
     assert not missing, f"missing: {missing}"

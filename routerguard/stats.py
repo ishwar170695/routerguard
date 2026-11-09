@@ -148,8 +148,8 @@ class UnbiasedLoadStats:
         if not self._blocks:
             raise RuntimeError("no MoE blocks found; call env.assert_moe_structure first")
         self._counts: dict[int, torch.Tensor] = {}
+        self._tokens: dict[int, int] = {}
         self._handles: list[Any] = []
-        self.n_tokens = 0
 
     def _hook(self, layer: int, num_experts: int):
         def hook(module, inputs, output):
@@ -164,7 +164,7 @@ class UnbiasedLoadStats:
                     self._counts[layer] += counts
                 else:
                     self._counts[layer] = counts
-                self.n_tokens += int(flat.shape[0])
+                self._tokens[layer] = self._tokens.get(layer, 0) + int(flat.shape[0])
         return hook
 
     def __enter__(self) -> "UnbiasedLoadStats":
@@ -182,7 +182,15 @@ class UnbiasedLoadStats:
 
     def reset(self) -> None:
         self._counts.clear()
-        self.n_tokens = 0
+        self._tokens.clear()
+
+    @property
+    def n_tokens(self) -> int:
+        """Tokens seen *per layer* (not summed over layers)."""
+        return max(self._tokens.values()) if self._tokens else 0
+
+    def tokens_per_layer(self) -> dict[int, int]:
+        return dict(self._tokens)
 
     def per_layer_counts(self) -> dict[int, torch.Tensor]:
         return {layer: counts.clone() for layer, counts in sorted(self._counts.items())}
@@ -196,6 +204,7 @@ class UnbiasedLoadStats:
         per_layer = self.per_layer_counts()
         out = aggregate(per_layer)
         out["tokens_seen"] = self.n_tokens
+        out["tokens_per_layer"] = self.tokens_per_layer()
         out["top_k"] = self.top_k
         if include_counts:
             # 64 ints per layer: cheap, and lets KL/transfer be recomputed later.
