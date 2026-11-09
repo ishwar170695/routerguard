@@ -258,10 +258,15 @@ def run_bookkeeping():
             "min_balance_transfer_ratio": 0.9,
         },
     )
-    assert gates["gini_skip_balance"]["status"] == "pass"
+    # 0.10 < 0.20 -> balancing has nothing to fix, so the decision is to pivot.
+    assert gates["gini_skip_balance"]["status"] == "pivot_to_redundancy_only", gates["gini_skip_balance"]
     assert gates["min_gain_over_frequency_pts"]["status"] == "fail"
     assert gates["min_balance_transfer_ratio"]["status"] == "pass"
     assert gates["max_kl_nats"]["status"] == "not_measured"
+    # a high baseline Gini is the *good* outcome for this gate
+    high = rgrun.summarize_gates(protocol, {"gini_skip_balance": 0.27})
+    assert high["gini_skip_balance"]["status"] == "proceed_with_balancing", high["gini_skip_balance"]
+    assert "not measured" in rgrun.format_gates(gates)
     return f"{run.run_id}, 4 artifacts + gates ok"
 
 

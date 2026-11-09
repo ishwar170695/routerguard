@@ -183,22 +183,75 @@ def new_run(
     return run
 
 
+# Gate semantics, stated once so the labels cannot be misread later.
+#   constraint -> measured value must satisfy the direction against the threshold
+#   decision   -> the threshold selects a branch; there is no "pass"/"fail"
+GATE_SPECS: dict[str, dict[str, Any]] = {
+    "gini_skip_balance": {
+        "kind": "decision",
+        "outcome_if_high": "proceed_with_balancing",
+        "outcome_if_low": "pivot_to_redundancy_only",
+        "meaning": "baseline Gini below this means load balancing has nothing to fix",
+    },
+    "max_kl_nats": {
+        "kind": "constraint",
+        "direction": "<=",
+        "meaning": "router-distribution shift on eval must stay under this (nats)",
+    },
+    "min_gain_over_frequency_pts": {
+        "kind": "constraint",
+        "direction": ">=",
+        "meaning": "redundancy pruning must beat frequency pruning by this many ppl points",
+    },
+    "min_balance_transfer_ratio": {
+        "kind": "constraint",
+        "direction": ">=",
+        "meaning": "fraction of the calibration-time balance gain that must survive on eval",
+    },
+}
+
+
 def summarize_gates(protocol: dict[str, Any], measured: dict[str, float]) -> dict[str, Any]:
-    """Compare measured values against the numeric gates in ``protocol.yaml``."""
-    gates = protocol.get("gates", {})
+    """Evaluate measured values against ``protocol.yaml`` gates.
+
+    A constraint reports pass/fail. A decision gate reports which branch was taken,
+    because for e.g. ``gini_skip_balance`` a *high* value is the good outcome.
+    """
     out: dict[str, Any] = {}
-    for name, threshold in gates.items():
-        if name not in measured:
-            out[name] = {"threshold": threshold, "measured": None, "status": "not_measured"}
-            continue
-        value = measured[name]
-        # Every gate here is "lower is better" except the two gain/transfer floors.
-        lower_is_better = name not in ("min_gain_over_frequency_pts", "min_balance_transfer_ratio")
-        passed = value <= threshold if lower_is_better else value >= threshold
-        out[name] = {
+    for name, threshold in (protocol.get("gates") or {}).items():
+        spec = GATE_SPECS.get(name, {"kind": "constraint", "direction": "<="})
+        value = measured.get(name)
+        entry: dict[str, Any] = {
             "threshold": threshold,
             "measured": value,
-            "direction": "<=" if lower_is_better else ">=",
-            "status": "pass" if passed else "fail",
+            "kind": spec["kind"],
+            "meaning": spec.get("meaning"),
         }
+        if value is None:
+            entry["status"] = "not_measured"
+            out[name] = entry
+            continue
+
+        if spec["kind"] == "decision":
+            branch = spec["outcome_if_high"] if value >= threshold else spec["outcome_if_low"]
+            entry["status"] = branch
+            entry["detail"] = f"{name}={value:.4f} {'>=' if value >= threshold else '<'} {threshold} -> {branch}"
+        else:
+            direction = spec["direction"]
+            passed = value <= threshold if direction == "<=" else value >= threshold
+            entry["status"] = "pass" if passed else "fail"
+            entry["direction"] = direction
+            entry["detail"] = f"{name}={value:.4f} {direction} {threshold} -> {'pass' if passed else 'fail'}"
+        out[name] = entry
     return out
+
+
+def format_gates(gates: dict[str, Any]) -> str:
+    """One line per gate, safe when a gate was not measured in this step."""
+    lines = []
+    for name, entry in gates.items():
+        if entry.get("measured") is None:
+            lines.append(f"  {name}: not measured in this step (threshold {entry['threshold']})")
+        else:
+            lines.append(f"  {entry.get('detail', name)}")
+    return "\n".join(lines)
