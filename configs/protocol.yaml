@@ -1,0 +1,83 @@
+# RouterGuard pre-registered protocol.
+#
+# FROZEN: numbers here are fixed before any results are seen. Do not edit after
+# looking at numbers; if a change is unavoidable, bump protocol_version, record
+# the reason in the run's metrics.json, and report both versions.
+protocol_version: 1
+frozen: true
+
+models:
+  dev: allenai/OLMoE-1B-7B-0924      # 6.9B total / 1.3B active, 64 experts, top-8, dropless
+  target: Qwen/Qwen1.5-MoE-A2.7B     # 14.3B total / 2.7B active, 60 routed + 1 shared, top-4
+
+# Calibration and held-out evaluation. Load statistics are reported on BOTH.
+calibration:
+  n_seqs: 200
+  seq_len: 1024
+  dataset: wikitext
+  config: wikitext-103-raw-v1
+  split: train
+  seed: 42
+
+eval:
+  n_seqs: 100
+  seq_len: 1024
+  dataset: wikitext
+  config: wikitext-103-raw-v1
+  split: test
+  seed: 42
+
+pruning:
+  ratios: [0.25, 0.50]          # fraction of ROUTED experts removed per layer
+  seeds: [42, 123]
+  keep_shared_expert: true      # never prune Qwen's always-on shared expert
+  # How the pruned router is defined, and therefore what "mask simulation" must mean:
+  #   reslice = the pruned model has a sliced gate; softmax is over KEPT experts only.
+  # Mask simulation must set removed logits to -inf BEFORE softmax/top-k, which makes
+  # mask-sim and real removal bitwise equivalent (see tests/test_equivalence.py).
+  removal_semantics: reslice
+
+metrics:
+  primary: memory_saved         # headline metric
+  perplexity: {dataset: wikitext, config: wikitext-103-raw-v1, split: test}
+  mmlu: {dataset: cais/mmlu, config: all, n_questions: 500, n_shot: 3, seed: 42}
+  throughput: {warmup: 5, runs: 10, seq_len: 512}   # secondary, report multi-run variance
+  load_stats_reported_on: [calibration, eval]
+
+# Numeric decision gates. Each gate is checked once, in the step named beside it.
+gates:
+  # Step 3: if baseline Gini is already below this, load balancing has nothing to fix.
+  gini_skip_balance: 0.20
+  # Step 3: max KL(nats) between unpatched and balanced router distributions on eval.
+  max_kl_nats: 0.05
+  # Step 4: redundancy-aware pruning must beat frequency pruning by this many ppl points.
+  min_gain_over_frequency_pts: 1.0
+  # Step 3: fraction of the calibration-time balance gain that must survive on eval.
+  min_balance_transfer_ratio: 0.5
+
+balance:
+  method: loss_free_balancing      # DeepSeek arXiv:2408.15664, adapted to calibration time
+  u: null                          # null = use default_u; explicit sweep is optional (Step 5)
+  default_u: 0.001
+  iters: 1                         # passes over the calibration set
+  update: b_i += u * sign(c_bar - c_i)   # per-expert router bias, frozen after calibration
+  selection_only: true             # top-k on (s + b); mixing weights from unbiased s
+
+similarity:
+  metric: mean_centered_cosine     # per layer, all experts on the same tokens
+  dtype: float32
+  save_dir: results/sim            # cosine matrices only; raw expert outputs are never stored
+
+budget:
+  # Hard caps so a Colab session cannot silently run away.
+  max_tokens_per_layer: 100000
+  max_layers: 24
+  max_greedy_steps: 16
+  abort_if_projected_over_seconds: 3600   # notebook 04 timing probe
+
+design:
+  ablation: balance_x_redundancy   # 2x2: balance on/off x redundancy on/off
+  baselines: [random, frequency]
+  fallback: >
+    If the redundancy metric does not beat frequency pruning, the controlled
+    negative result IS the deliverable, stated up front.
